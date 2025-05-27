@@ -1,0 +1,183 @@
+{\rtf1\ansi\ansicpg1252\deff0\nouicompat\deflang1033{\fonttbl{\f0\fnil\fcharset0 Calibri;}}
+{\*\generator Riched20 10.0.19041}\viewkind4\uc1 
+\pard\sa200\sl276\slmult1\f0\fs22\lang9 Setting up unidirectional replication in Oracle GoldenGate involves configuring processes on a source database to capture changes and send them to a target database, where a Replicat process applies them. Here's a detailed breakdown of the steps, incorporating both Classic and Microservices Architectures where applicable:\par
+\par
+I. Prerequisites and Initial Setup (Both Source and Target Databases)\par
+\par
+Database Configuration:\par
+\par
+ARCHIVELOG Mode: Ensure both source and target databases are in ARCHIVELOG mode.\par
+SQL\par
+\par
+SQL> SELECT LOG_MODE FROM V$DATABASE;\par
+SQL> SHUTDOWN IMMEDIATE;\par
+SQL> STARTUP MOUNT;\par
+SQL> ALTER DATABASE ARCHIVELOG;\par
+SQL> ALTER DATABASE OPEN;\par
+Force Logging: Enable force logging to ensure all changes are logged.\par
+SQL\par
+\par
+SQL> ALTER DATABASE FORCE LOGGING;\par
+Supplemental Logging: Enable supplemental logging at the database level to capture all necessary information for replication.\par
+SQL\par
+\par
+SQL> ALTER DATABASE ADD SUPPLEMENTAL LOG DATA;\par
+SQL> SELECT SUPPLEMENTAL_LOG_DATA_MIN, FORCE_LOGGING FROM V$DATABASE;\par
+ENABLE_GOLDENGATE_REPLICATION: Set this parameter to TRUE.\par
+SQL\par
+\par
+SQL> ALTER SYSTEM SET ENABLE_GOLDENGATE_REPLICATION=TRUE SCOPE=BOTH;\par
+SQL> SHOW PARAMETER ENABLE_GOLDENGATE_REPLICATION;\par
+GoldenGate User Creation and Privileges:\par
+\par
+Create a dedicated Oracle GoldenGate user on both source and target databases.\par
+SQL\par
+\par
+SQL> CREATE USER gguser IDENTIFIED BY gguser DEFAULT TABLESPACE users QUOTA UNLIMITED ON users;\par
+SQL> GRANT CREATE SESSION, CONNECT, RESOURCE, ALTER SYSTEM TO gguser;\par
+SQL> EXEC DBMS_GOLDENGATE_AUTH.GRANT_ADMIN_PRIVILEGE(grantee=>'gguser', privilege_type=>'CAPTURE', grant_optional_privileges=>'*');\par
+For CDB/PDB environments, you might need to create a common user (C##gguser) and grant privileges with CONTAINER=ALL.\par
+SQL\par
+\par
+SQL> CREATE USER c##gguser IDENTIFIED BY gguser DEFAULT TABLESPACE users QUOTA UNLIMITED ON users CONTAINER=ALL;\par
+SQL> GRANT CREATE SESSION, CONNECT, RESOURCE, ALTER SYSTEM TO c##gguser CONTAINER=ALL;\par
+SQL> EXEC DBMS_GOLDENGATE_AUTH.GRANT_ADMIN_PRIVILEGE(grantee=>'c##gguser', privilege_type=>'CAPTURE', grant_optional_privileges=>'*', container=>'ALL');\par
+Install Oracle GoldenGate: Install GoldenGate binaries on both the source and target servers.\par
+\par
+Create GoldenGate Subdirectories:\par
+\par
+Navigate to your GoldenGate home directory in the command line (or GGSCI).\par
+Run CREATE SUBDIRS to create the necessary directory structure for trail files, parameter files, etc.\par
+GGSCI> CREATE SUBDIRS\par
+Manager Process Configuration (Both Source and Target):\par
+\par
+The Manager process controls all GoldenGate activities. It must be running on both sides.\par
+Open GGSCI and edit the Manager parameter file:\par
+GGSCI> EDIT PARAMS MGR\par
+Add (or modify) the following parameters:\par
+PORT 7809  # Or your desired port\par
+# For Microservices Architecture, you might not directly edit mgr.prm.\par
+# Manager is part of the Service Manager in Microservices.\par
+Start the Manager:\par
+GGSCI> START MGR\par
+GGSCI> INFO MGR\par
+II. Source Database Configuration\par
+\par
+DBLOGIN to Source Database:\par
+\par
+GGSCI> DBLOGIN USERID gguser, PASSWORD gguser\par
+(Or USERIDALIAS <alias> if using a credential store)\par
+\par
+Add TRANDATA for Tables/Schemas:\par
+\par
+This step enables GoldenGate to capture changes for specific tables or schemas.\par
+GGSCI> ADD TRANDATA schema_name.table_name;\par
+# Or for all tables in a schema:\par
+GGSCI> ADD SCHEMATRANDATA schema_name;\par
+Primary Extract Process (Capture):\par
+\par
+This process captures DML and DDL changes from the source database's redo logs.\par
+Create the Extract parameter file:\par
+GGSCI> EDIT PARAMS EXT_PRIMARY\par
+Add parameters (example for Classic Architecture):\par
+EXTRACT EXT_PRIMARY\par
+USERID gguser, PASSWORD gguser\par
+EXTTRAIL ./dirdat/aa  # Local trail file\par
+DDL INCLUDE ALL      # Optional: include DDL replication\par
+TABLE schema_name.table_name; # Or schema_name.*\par
+# For Integrated Extract:\par
+REGISTER EXTRACT EXT_PRIMARY DATABASE\par
+# Add a checkpoint table for integrated capture (optional, but good practice)\par
+CHECKPOINTTABLE gguser.chkpt\par
+Add the Extract group:\par
+GGSCI> ADD EXTRACT EXT_PRIMARY, INTEGRATED TRANLOG, BEGIN NOW\par
+Add the local trail file:\par
+GGSCI> ADD EXTTRAIL ./dirdat/aa, EXTRACT EXT_PRIMARY\par
+Data Pump Process (Optional, but Recommended):\par
+\par
+The Data Pump reads from the local trail file and sends the data to the target system. This provides a clean separation of capture and delivery.\par
+Create the Data Pump parameter file:\par
+GGSCI> EDIT PARAMS DP_PUMP\par
+Add parameters:\par
+EXTRACT DP_PUMP\par
+USERID gguser, PASSWORD gguser\par
+RMTHOST target_hostname, MGRPORT 7809 # Target Manager port\par
+RMTTRAIL ./dirdat/bb # Remote trail file on the target server\par
+DDL INCLUDE ALL\par
+TABLE schema_name.table_name; # Or schema_name.*\par
+Add the Data Pump group:\par
+GGSCI> ADD EXTRACT DP_PUMP, EXTTRAILSORUCE ./dirdat/aa\par
+Add the remote trail:\par
+GGSCI> ADD RMTTRAIL ./dirdat/bb, EXTRACT DP_PUMP\par
+III. Target Database Configuration\par
+\par
+DBLOGIN to Target Database:\par
+\par
+GGSCI> DBLOGIN USERID gguser, PASSWORD gguser\par
+(Or USERIDALIAS <alias>)\par
+\par
+Create Checkpoint Table:\par
+\par
+A checkpoint table is crucial for Replicat to maintain its position in the trail files.\par
+GGSCI> ADD CHECKPOINTTABLE gguser.chkpt\par
+Important: If using GoldenGate Microservices Architecture, the CHECKPOINTTABLE parameter should be added to the GLOBALS file on the target server:\par
+GGSCI> EDIT PARAMS ./GLOBALS\par
+CHECKPOINTTABLE gguser.chkpt\par
+Replicat Process (Apply):\par
+\par
+The Replicat process reads from the remote trail file and applies the changes to the target database.\par
+Create the Replicat parameter file:\par
+GGSCI> EDIT PARAMS REP_APPLY\par
+Add parameters:\par
+REPLICAT REP_APPLY\par
+USERID gguser, PASSWORD gguser\par
+DDL INCLUDE ALL      # Optional: apply DDL replication\par
+DDLERROR DEFAULT IGNORE # Handle DDL errors (adjust as needed)\par
+MAP schema_name.table_name, TARGET schema_name.table_name; # Map source to target\par
+# For Integrated Replicat:\par
+ASSUMETARGETDEFS\par
+# If using a checkpoint table:\par
+CHECKPOINTTABLE gguser.chkpt\par
+Add the Replicat group:\par
+GGSCI> ADD REPLICAT REP_APPLY, EXTTRAIL ./dirdat/bb, CHECKPOINTTABLE gguser.chkpt\par
+For Integrated Replicat:\par
+GGSCI> ADD REPLICAT REP_APPLY, INTEGRATED, EXTTRAIL ./dirdat/bb, CHECKPOINTTABLE gguser.chkpt\par
+IV. Start and Monitor Processes\par
+\par
+Start Processes (in order):\par
+\par
+Source:\par
+GGSCI> START EXTRACT EXT_PRIMARY\par
+GGSCI> START EXTRACT DP_PUMP\par
+Target:\par
+GGSCI> START REPLICAT REP_APPLY\par
+Monitor Processes:\par
+\par
+Regularly check the status of all GoldenGate processes.\par
+GGSCI> INFO ALL\par
+GGSCI> STATS EXT_PRIMARY\par
+GGSCI> STATS DP_PUMP\par
+GGSCI> STATS REP_APPLY\par
+Check report files (dirrpt directory) for detailed information and errors.\par
+Check discard files (dirdsc directory) on the target for any rejected transactions.\par
+V. Testing the Replication\par
+\par
+On the Source Database: Perform DML (INSERT, UPDATE, DELETE) and/or DDL operations on the replicated tables.\par
+SQL\par
+\par
+SQL> INSERT INTO schema_name.table_name VALUES (...);\par
+SQL> COMMIT;\par
+On the Target Database: Verify that the changes are applied to the target tables.\par
+Key Concepts in Unidirectional GoldenGate:\par
+\par
+Manager (MGR): The control process for all GoldenGate operations. Runs on both source and target.\par
+Extract: Captures transactional data from the source database's redo logs. Can be "Classic" or "Integrated".\par
+Data Pump (Secondary Extract): An optional but recommended process that reads from the local trail file on the source and transmits it to the target. This offloads network I/O from the primary Extract.\par
+Collector: A process on the target that receives data from the Data Pump and writes it to the remote trail files. (Implicitly handled by the Manager or Receiver Server in Microservices).\par
+Trail Files: Files on disk that store the captured transactional data. Local trails are on the source, remote trails on the target.\par
+Replicat: Reads the remote trail files on the target and applies the changes to the target database. Can be "Classic" or "Integrated".\par
+Checkpoint Table: A table in the target database used by Replicat to record its progress, ensuring fault tolerance and recovery.\par
+TRANDATA / SCHEMATRANDATA: Commands used to enable supplemental logging for specific tables or schemas, which is essential for GoldenGate to capture all necessary data for replication.\par
+Microservices Architecture: A newer architecture for GoldenGate that uses REST APIs, with components like Service Manager, Administration Server, Distribution Server, and Receiver Server, offering enhanced manageability and scalability. The core Extract and Replicat concepts remain similar, but their deployment and management differ.\par
+}
+ 
